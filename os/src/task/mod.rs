@@ -15,7 +15,11 @@ mod switch;
 mod task;
 
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{VirtAddr, MapPermission};
+// use crate::mm::VirtPageNum;
 use crate::sync::UPSafeCell;
+use crate::syscall::*;
+use crate::timer::{get_time_ms, get_time_us};
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
 use lazy_static::*;
@@ -80,6 +84,7 @@ impl TaskManager {
         let next_task = &mut inner.tasks[0];
         next_task.task_status = TaskStatus::Running;
         let next_task_cx_ptr = &next_task.task_cx as *const TaskContext;
+        next_task.start_time = get_time_ms();
         drop(inner);
         let mut _unused = TaskContext::zero_init();
         // before this, we should drop local variables that must be dropped manually
@@ -140,6 +145,9 @@ impl TaskManager {
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
+            if inner.tasks[next].start_time == 0 {
+                inner.tasks[next].start_time = get_time_ms();
+            }
             inner.current_task = next;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
@@ -152,6 +160,77 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+    ///
+    fn syscall_table_mapping(syscall_id: usize)->usize{
+        match syscall_id {
+            SYSCALL_WRITE => 0,
+            SYSCALL_EXIT => 1,
+            SYSCALL_YIELD => 2,
+            SYSCALL_GET_TIME => 3,
+            SYSCALL_TASK_INFO => 4,
+            SYSCALL_MMAP => 5,
+            SYSCALL_MUNMAP => 6,
+            SYSCALL_SBRK => 7,
+            _ => 999
+        }
+    }
+    ///
+    fn get_task_info(&self, ti: *mut TaskInfo) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let current_tcb = &mut inner.tasks[current];
+        let current_time = get_time_us() / 1000;
+        let syscall_map = TaskManager::syscall_table_mapping;
+        unsafe {
+            (*ti).time = current_time - current_tcb.start_time;
+            (*ti).syscall_times[SYSCALL_WRITE] = current_tcb.syscall_times[syscall_map(SYSCALL_WRITE)];
+            (*ti).syscall_times[SYSCALL_EXIT] = current_tcb.syscall_times[syscall_map(SYSCALL_EXIT)];
+            (*ti).syscall_times[SYSCALL_YIELD] = current_tcb.syscall_times[syscall_map(SYSCALL_YIELD)];
+            (*ti).syscall_times[SYSCALL_GET_TIME] = current_tcb.syscall_times[syscall_map(SYSCALL_GET_TIME)];
+            (*ti).syscall_times[SYSCALL_TASK_INFO] = current_tcb.syscall_times[syscall_map(SYSCALL_TASK_INFO)];
+            (*ti).syscall_times[SYSCALL_MMAP] = current_tcb.syscall_times[syscall_map(SYSCALL_MMAP)];
+            (*ti).syscall_times[SYSCALL_MUNMAP] = current_tcb.syscall_times[syscall_map(SYSCALL_MUNMAP)];
+            (*ti).syscall_times[SYSCALL_SBRK] = current_tcb.syscall_times[syscall_map(SYSCALL_SBRK)];
+            (*ti).status = TaskStatus::Running;
+        }
+        drop(inner);
+    }
+    ///
+    fn add_syscall_times(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let current_tcb = &mut inner.tasks[current];
+        let syscall_map = TaskManager::syscall_table_mapping;
+        match syscall_id {
+            SYSCALL_WRITE => current_tcb.syscall_times[syscall_map(SYSCALL_WRITE)] += 1,
+            SYSCALL_EXIT => current_tcb.syscall_times[syscall_map(SYSCALL_EXIT)] += 1,
+            SYSCALL_YIELD => current_tcb.syscall_times[syscall_map(SYSCALL_YIELD)] += 1,
+            SYSCALL_GET_TIME => current_tcb.syscall_times[syscall_map(SYSCALL_GET_TIME)] += 1,
+            SYSCALL_TASK_INFO => current_tcb.syscall_times[syscall_map(SYSCALL_TASK_INFO)] += 1,
+            SYSCALL_MMAP => current_tcb.syscall_times[syscall_map(SYSCALL_MMAP)] += 1,
+            SYSCALL_MUNMAP => current_tcb.syscall_times[syscall_map(SYSCALL_MUNMAP)] += 1,
+            SYSCALL_SBRK => current_tcb.syscall_times[syscall_map(SYSCALL_SBRK)] += 1,
+            _ => {}
+        }
+        // println!("GET_TIME {}", current_tcb.syscall_times[SYSCALL_GET_TIME]);
+        drop(inner);
+    }
+    ///
+    fn insert_current_map_frame(&self,start_va: VirtAddr,end_va: VirtAddr,permission: MapPermission,) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current]
+            .memory_set
+            .insert_framed_area(start_va, end_va, permission);
+    }
+    ///
+    fn remove_current_map_frame(&self,start_va: VirtAddr,end_va: VirtAddr) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current]
+            .memory_set
+            .remove_framed_area(start_va, end_va);
     }
 }
 
@@ -201,4 +280,20 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+///
+pub fn get_task_info(ti: *mut TaskInfo) {
+    TASK_MANAGER.get_task_info(ti)
+}
+///
+pub fn add_syscall_times(syscall_id: usize) {
+    TASK_MANAGER.add_syscall_times(syscall_id);
+}
+///
+pub fn insert_current_map_frame(start_va: VirtAddr, end_va: VirtAddr, permission: MapPermission) {
+    TASK_MANAGER.insert_current_map_frame(start_va, end_va, permission);
+}
+///
+pub fn remove_current_map_frame(start_va: VirtAddr, end_va: VirtAddr) {
+    TASK_MANAGER.remove_current_map_frame(start_va, end_va);
 }

@@ -1,6 +1,10 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
 
-use super::{frame_alloc, FrameTracker, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+
+use crate::task::{insert_current_map_frame, remove_current_map_frame};
+
+use super::address::VPNRange;
+use super::{frame_alloc, FrameTracker, PhysPageNum, StepByOne, VirtAddr, VirtPageNum, MapPermission};
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::*;
@@ -108,7 +112,7 @@ impl PageTable {
         result
     }
     /// Find PageTableEntry by VirtPageNum
-    fn find_pte(&self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
+    pub fn find_pte(&self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
         let mut result: Option<&mut PageTableEntry> = None;
@@ -170,4 +174,52 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
         start = end_va.into();
     }
     v
+}
+/// 
+pub fn translated_physical_address(token: usize, ptr: *const u8)->usize {
+    let page_table = PageTable::from_token(token);
+    let va = VirtAddr::from(ptr as usize);
+    let ppn = page_table.find_pte(va.floor()).unwrap().ppn();
+    super::PhysAddr::from(ppn).0 + va.page_offset()
+}
+///
+fn map_vpn_check(token: usize, start: usize, len: usize, mode: bool)->isize {
+    let page_table = PageTable::from_token(token);
+    let start_va: VirtAddr = start.into();
+    let end_va: VirtAddr = (start + len).into();
+    let start_vpn: VirtPageNum = start_va.into();
+    let end_vpn: VirtPageNum = end_va.ceil().into();
+    let range_vpn: VPNRange = VPNRange::new(start_vpn, end_vpn);
+
+    for vpn in range_vpn {
+        match page_table.translate(vpn) {
+            Some(pte) => {
+                if !(pte.is_valid() ^ mode){
+                    return -1;
+                }
+            }
+            None => {}
+        }
+    }
+    0
+}
+///
+pub fn mmap_page(token: usize, start: usize, len: usize, permission: MapPermission)-> isize {
+    match map_vpn_check(token, start, len, true) {
+        0 => {},
+        -1 => return -1,
+        _ => {}
+    }
+    insert_current_map_frame(VirtAddr::from(start), VirtAddr::from(start + len), permission);
+    0
+}
+///
+pub fn unmap_page(token: usize, start: usize, len: usize)->isize {
+    match map_vpn_check(token, start, len, false) {
+        0 => {},
+        -1 => return -1,
+        _ => {}
+    }
+    remove_current_map_frame(VirtAddr::from(start), VirtAddr::from(start + len));
+    0
 }
