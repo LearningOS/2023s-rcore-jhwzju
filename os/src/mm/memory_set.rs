@@ -88,6 +88,17 @@ impl MemorySet {
         }
         self.areas.push(map_area);
     }
+    /// TODO:
+    pub fn remove_framed_area (&mut self, start_va: VirtAddr, end_va: VirtAddr,) {
+        let  vpnrange = VPNRange::new(VirtAddr::from(start_va).floor(), VirtAddr::from(end_va).ceil());
+        for vpn in vpnrange{
+            for area in &mut self.areas{
+                if vpn < area.vpn_range.get_end() && vpn >= area.vpn_range.get_start(){
+                    area.unmap_one(&mut self.page_table, vpn);
+                }
+            }
+        }
+    }
     /// Mention that trampoline is not collected by areas.
     fn map_trampoline(&mut self) {
         self.page_table.map(

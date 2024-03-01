@@ -7,7 +7,7 @@ use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
-use alloc::vec;
+use alloc::{vec};
 use alloc::vec::Vec;
 use core::cell::RefMut;
 
@@ -24,6 +24,11 @@ pub struct TaskControlBlock {
 
     /// Mutable
     inner: UPSafeCell<TaskControlBlockInner>,
+    /// start time
+    pub start_time: usize,
+
+    /// syscall time
+    pub syscall_times: [u32; 17]
 }
 
 impl TaskControlBlock {
@@ -71,6 +76,10 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+    ///
+    pub task_priority: usize,
+    /// 
+    pub task_stride: usize, 
 }
 
 impl TaskControlBlockInner {
@@ -115,6 +124,8 @@ impl TaskControlBlock {
         let task_control_block = Self {
             pid: pid_handle,
             kernel_stack,
+            start_time: 0,
+            syscall_times: [0; 17],
             inner: unsafe {
                 UPSafeCell::new(TaskControlBlockInner {
                     trap_cx_ppn,
@@ -135,8 +146,12 @@ impl TaskControlBlock {
                     ],
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    task_priority: 16,
+                    task_stride: 0,
                 })
+                
             },
+            
         };
         // prepare TrapContext in user space
         let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
@@ -203,6 +218,8 @@ impl TaskControlBlock {
         let task_control_block = Arc::new(TaskControlBlock {
             pid: pid_handle,
             kernel_stack,
+            start_time: 0,
+            syscall_times: [0; 17],
             inner: unsafe {
                 UPSafeCell::new(TaskControlBlockInner {
                     trap_cx_ppn,
@@ -216,6 +233,8 @@ impl TaskControlBlock {
                     fd_table: new_fd_table,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    task_stride: 0,
+                    task_priority: 16
                 })
             },
         });
