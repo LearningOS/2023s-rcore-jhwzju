@@ -14,9 +14,13 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
-use crate::config::MAX_APP_NUM;
+
+use crate::config::{MAX_APP_NUM};
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
+use crate::timer::{get_time_ms};
+use crate::syscall::*;
+
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
@@ -47,6 +51,7 @@ pub struct TaskManagerInner {
     current_task: usize,
 }
 
+
 lazy_static! {
     /// Global variable: TASK_MANAGER
     pub static ref TASK_MANAGER: TaskManager = {
@@ -54,6 +59,8 @@ lazy_static! {
         let mut tasks = [TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
+            start_time: 0,
+            syscall_times: [0; 5],
         }; MAX_APP_NUM];
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
@@ -81,6 +88,7 @@ impl TaskManager {
         let task0 = &mut inner.tasks[0];
         task0.task_status = TaskStatus::Running;
         let next_task_cx_ptr = &task0.task_cx as *const TaskContext;
+        task0.start_time = get_time_ms();
         drop(inner);
         let mut _unused = TaskContext::zero_init();
         // before this, we should drop local variables that must be dropped manually
@@ -94,6 +102,7 @@ impl TaskManager {
     fn mark_current_suspended(&self) {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
+        //println!("task {} suspended", current);
         inner.tasks[current].task_status = TaskStatus::Ready;
     }
 
@@ -101,6 +110,8 @@ impl TaskManager {
     fn mark_current_exited(&self) {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
+        //println!("task {} exited", current);
+        // println!("[task {} exited. start_time: {} ms", current, inner.tasks[current].start_time);
         inner.tasks[current].task_status = TaskStatus::Exited;
     }
 
@@ -121,10 +132,15 @@ impl TaskManager {
         if let Some(next) = self.find_next_task() {
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
+            //println!("task {} start", current);
             inner.tasks[next].task_status = TaskStatus::Running;
+            if inner.tasks[next].start_time == 0 {
+                inner.tasks[next].start_time = get_time_ms();
+            }
             inner.current_task = next;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
+            
             drop(inner);
             // before this, we should drop local variables that must be dropped manually
             unsafe {
@@ -134,6 +150,58 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+
+    fn syscall_table_mapping(syscall_id: usize)-> usize{
+        match syscall_id {
+            SYSCALL_WRITE => 0,
+            SYSCALL_EXIT => 1,
+            SYSCALL_YIELD => 2,
+            SYSCALL_GET_TIME => 3,
+            SYSCALL_TASK_INFO => 4,
+            _ => 999
+        }
+    }
+
+    fn get_task_info(&self, ti: *mut TaskInfo) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let current_tcb = &mut inner.tasks[current];
+        let current_time = get_time_ms();
+        let syscall_map = TaskManager::syscall_table_mapping;
+        unsafe {
+            (*ti).time = current_time - current_tcb.start_time;
+            (*ti).syscall_times[SYSCALL_WRITE] = current_tcb.syscall_times[syscall_map(SYSCALL_WRITE)];
+            (*ti).syscall_times[SYSCALL_EXIT] = current_tcb.syscall_times[syscall_map(SYSCALL_EXIT)];
+            (*ti).syscall_times[SYSCALL_YIELD] = current_tcb.syscall_times[syscall_map(SYSCALL_YIELD)];
+            (*ti).syscall_times[SYSCALL_GET_TIME] = current_tcb.syscall_times[syscall_map(SYSCALL_GET_TIME)];
+            (*ti).syscall_times[SYSCALL_TASK_INFO] = current_tcb.syscall_times[syscall_map(SYSCALL_TASK_INFO)];
+            (*ti).status = TaskStatus::Running;
+        }
+        drop(inner);
+    }
+
+    fn add_syscall_times(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let current_tcb = &mut inner.tasks[current];
+        let syscall_map = TaskManager::syscall_table_mapping;
+        match syscall_id {
+            SYSCALL_WRITE => current_tcb.syscall_times[syscall_map(SYSCALL_WRITE)] += 1,
+            SYSCALL_EXIT => current_tcb.syscall_times[syscall_map(SYSCALL_EXIT)] += 1,
+            SYSCALL_YIELD => current_tcb.syscall_times[syscall_map(SYSCALL_YIELD)] += 1,
+            SYSCALL_GET_TIME => current_tcb.syscall_times[syscall_map(SYSCALL_GET_TIME)] += 1,
+            SYSCALL_TASK_INFO => current_tcb.syscall_times[syscall_map(SYSCALL_TASK_INFO)] += 1,
+            _ => {}
+        }
+        // println!("GET_TIME {}", current_tcb.syscall_times[SYSCALL_GET_TIME]);
+        drop(inner);
+    }
+    
+    fn get_syscall_times(&self)->[u32;5] {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_times
     }
 }
 
@@ -168,4 +236,16 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+///
+pub fn add_syscall_times(syscall_id: usize) {
+    TASK_MANAGER.add_syscall_times(syscall_id);
+}
+///
+pub fn get_syscall_times()->[u32; 5] {
+    TASK_MANAGER.get_syscall_times()
+}
+///
+pub fn get_task_info(ti: *mut TaskInfo) {
+    TASK_MANAGER.get_task_info(ti);
 }
