@@ -15,7 +15,7 @@
 //! might not be what you expect.
 mod context;
 mod id;
-mod manager;
+pub mod manager;
 mod processor;
 mod switch;
 #[allow(clippy::module_inception)]
@@ -35,6 +35,8 @@ pub use processor::{
     current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task,
     Processor,
 };
+///
+pub const BIG_STRIDE: usize = 1000000;
 /// Suspend the current 'Running' task and run the next task in task list.
 pub fn suspend_current_and_run_next() {
     // There must be an application running.
@@ -45,8 +47,9 @@ pub fn suspend_current_and_run_next() {
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     // Change status to Ready
     task_inner.task_status = TaskStatus::Ready;
-    drop(task_inner);
+    task_inner.task_stride = task_inner.task_stride + BIG_STRIDE / task_inner.task_priority;
     // ---- release current PCB
+    drop(task_inner);
 
     // push back to ready queue.
     add_task(task);

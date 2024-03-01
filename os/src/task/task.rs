@@ -22,6 +22,11 @@ pub struct TaskControlBlock {
 
     /// Mutable
     inner: UPSafeCell<TaskControlBlockInner>,
+    /// start time
+    pub start_time: usize,
+
+    /// syscall time
+    pub syscall_times: [u32; 15]
 }
 
 impl TaskControlBlock {
@@ -68,6 +73,10 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+    ///
+    pub task_priority: usize,
+    /// 
+    pub task_stride: usize, 
 }
 
 impl TaskControlBlockInner {
@@ -118,8 +127,12 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    task_priority: 16,
+                    task_stride: 0
                 })
             },
+            start_time: 0,
+            syscall_times: [0; 15]
         };
         // prepare TrapContext in user space
         let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
@@ -191,8 +204,12 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    task_priority: 16,
+                    task_stride: 0
                 })
             },
+            start_time: 0,
+            syscall_times: [0; 15]
         });
         // add child
         parent_inner.children.push(task_control_block.clone());
