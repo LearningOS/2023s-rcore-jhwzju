@@ -1,9 +1,20 @@
+use crate::task::process::ProcessControlBlockInner;
+use core::cell::RefMut;
+
 use crate::{
     mm::kernel_token,
     task::{add_task, current_task, TaskControlBlock},
     trap::{trap_handler, TrapContext},
 };
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec};
+///
+pub fn deadlock_detecter_init(process_inner: &mut RefMut<ProcessControlBlockInner>) {
+    let mutex_num = process_inner.mutex_request.get(0).map_or(0, |v| v.len());
+    let semaphore_num = process_inner.sema_request.get(0).map_or(0, |v| v.len());
+    process_inner.mutex_request.push(vec![0; mutex_num]);
+    process_inner.sema_request.push(vec![0; semaphore_num]);
+    process_inner.finished.push(false);
+}
 /// thread create syscall
 pub fn sys_thread_create(entry: usize, arg: usize) -> isize {
     trace!(
@@ -36,6 +47,8 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> isize {
     let new_task_tid = new_task_res.tid;
     let mut process_inner = process.inner_exclusive_access();
     // add new thread to current process
+    deadlock_detecter_init(&mut process_inner);
+    
     let tasks = &mut process_inner.tasks;
     while tasks.len() < new_task_tid + 1 {
         tasks.push(None);
